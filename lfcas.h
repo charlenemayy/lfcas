@@ -6,6 +6,9 @@
 #include <unistd.h>
 #include <fstream>
 #include <stack>
+#include <atomic>
+#include <vector>
+#include <set>
 
 //=== Constants =====================================
 #define CONT_CONTRIB 250 // For adaptation
@@ -104,10 +107,7 @@ struct join_neighbor {
     normal_base<T>* base;
     node<T>* main_node; // The main node for the join
 };
-template <class T>
-struct lfcat{
-    std::atomic<node<T>*> root;
-};
+
 template <class T>
 struct lfcat{
     std::atomic<node<T>*> root;
