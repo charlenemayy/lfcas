@@ -597,3 +597,7 @@ class lfcatree {
     }
 };
 
+int main () {
+    std::cout << "Yo!! Yo!!" << std::endl;
+    return 0;
+}
