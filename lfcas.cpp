@@ -62,7 +62,7 @@ class lfcatree {
 	     ((&n->main_node->neigh2)->load() == aborted_status ||
 	      (&n->main_node->neigh2)->load() == done_status)) ||
 	    (n->type == range &&
-	     (&n->storage->result)->load() != not_set_status));
+	     (&n->storage->result)->load() != not_set_status)); // current result is set
         return status;
 	}
 
@@ -117,6 +117,9 @@ class lfcatree {
     	while(true) {
     		base = find_base_node((&m->root)->load(), i);
     		if(is_replaceable(base)) {
+                lock.lock();
+                std::cout << "hello" << "\n";
+                lock.unlock();
  	   			bool res;
     			node<T>* newb;
                 newb = new node<T>();
@@ -402,9 +405,6 @@ class lfcatree {
 
 
         find_first:b = find_base_stack((&t->root)->load(),lo,&s); // Find base nodes
-                lock.lock();
-                std::cout << "uh" << s.stack_lib << "\n";
-                lock.unlock();
 
     	if(help_s != NULL) { // result storage
             lock.lock();
@@ -417,6 +417,7 @@ class lfcatree {
 			}
     	} else if(is_replaceable(b)) { // result field != not_set_status
     		my_s = new rs<T>;
+            my_s->result = not_set_status;
             my_s->more_than_one_base = false;
     		node<T>* n = new_range_base(b, lo, hi, my_s); // new range base with updated result storage
 
@@ -507,8 +508,9 @@ class lfcatree {
     		res = vector_join(res, done.stack_array->at(i)->data); // join all the data in the base nodes together
 
         if((&my_s->result)->compare_exchange_weak(not_set_status, res, // if still not set by another thread, replace
-        std::memory_order_release, std::memory_order_relaxed) && done.stack_lib->size() > 1)
-    		(&my_s->more_than_one_base)->store(true);
+        std::memory_order_release, std::memory_order_relaxed)) { // && done.stack_lib->size() > 1) {
+    	    (&my_s->more_than_one_base)->store(true);
+        }
 
     	adapt_if_needed(t, done.stack_array->at(rand() % done.stack_array->size()));
     	return (&my_s->result)->load();

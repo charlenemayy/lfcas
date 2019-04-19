@@ -19,7 +19,7 @@
 #define HIGH_CONT 1000 // ...
 #define LOW_CONT -1000 // ...
 #define NOT_FOUND (node<T>*)1 // Special pointers
-#define NUM_THREADS 1
+#define NUM_THREADS 10
 #define NUM_UPDATE 10
 #define NUM_LOOKUP 10
 #define NUM_QUERY 1
@@ -30,7 +30,7 @@ enum node_type {
 //=== Data Structures ===============================
 template <class T>
 struct rs { // Result storage for range queries (list of values)
-    rs() : result((std::vector<T>*)1), more_than_one_base(false) {}
+    rs() : more_than_one_base(false) {}
     std::atomic<std::vector<T>*> result; // The result
     std::atomic<T> more_than_one_base;
 };
