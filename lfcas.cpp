@@ -26,19 +26,23 @@ class lfcatree {
             lock.lock();
             std::cout << "checkpoint" << "\n";
             lock.unlock();
-	        return (&m->root)->compare_exchange_weak(b, new_b, // cas
+	        return m->root.compare_exchange_weak(b, new_b, // cas
                    std::memory_order_release, std::memory_order_relaxed);
-        } else if((&b->parent->left)->load() == b) {
+        } else if((&b->parent->left)->load() == b) { // b is on left
+            /*
             lock.lock();
             std::cout << "checkpoint1" << "\n";
+            std::cout << b->parent->left.compare_exchange_weak(b, new_b, // cas
+                   std::memory_order_release, std::memory_order_relaxed) << "\n";
             lock.unlock();
-	        return (&b->parent->left)->compare_exchange_weak(b, new_b, // cas
+            */
+	        return b->parent->left.compare_exchange_weak(b, new_b, // cas
                    std::memory_order_release, std::memory_order_relaxed);
-        } else if((&b->parent->right)->load() == b) {
+        } else if((&b->parent->right)->load() == b) { // b is on right
             lock.lock();
             std::cout << "checkpoint2" << "\n";
             lock.unlock();
-	        return (&b->parent->right)->compare_exchange_weak(b, new_b, // cas
+	        return b->parent->right.compare_exchange_weak(b, new_b, // cas
                    std::memory_order_release, std::memory_order_relaxed);
         } else {
             lock.lock();
@@ -206,15 +210,13 @@ class lfcatree {
     }
 
     //=== Stack Functions ===========================
-    // Range Query
-    stack<T>* stack_reset(stack<T>* s) {
-        s = new stack<T>();
-        // s->stack_array.clear();
-        return s;
-    }
 
     // Range Query
     void push(stack<T>* s, node<T>* n) {
+        if(s == NULL || s->stack_lib == NULL) {
+            s->stack_lib = new std::stack<node<T>*>(); // stack_reset
+            s->stack_array = new std::vector<node<T>*>();
+        }
         s->stack_lib->push(n);
         s->stack_array->insert(s->stack_array->begin(), n);
         return;
@@ -222,7 +224,9 @@ class lfcatree {
 
     // Range Query
     node<T>* pop(stack<T>* s) {
+        if(s == NULL || s->stack_lib == NULL) return NULL;
         node<T>* n = s->stack_lib->top();
+
         s->stack_lib->pop();
         s->stack_array->erase(s->stack_array->begin());
         return n;
@@ -240,11 +244,11 @@ class lfcatree {
     }
 
     // Range Query
-    stack<T>* copy_state(stack<T>* s) {
-        stack<T>* q = new stack<T>();
-        q->stack_lib = s->stack_lib;
-        q->stack_array = s->stack_array;
-        return s;
+    stack<T> copy_state(stack<T>* s) {
+        stack<T> q;
+        q.stack_lib = s->stack_lib;
+        q.stack_array = s->stack_array;
+        return q;
     }
 
     //=== Public Interface ==========================
@@ -310,7 +314,8 @@ class lfcatree {
     // Find base nodes in a depth first traversal through route nodes. Uses a
     // stack s to store the search path to the current base node.
     node<T>* find_base_stack(node<T>* n, int i, stack<T>* s) {
-        s = stack_reset(s);
+        s->stack_lib = new std::stack<node<T>*>(); // stack_reset
+        s->stack_array = new std::vector<node<T>*>();
         if(n == NULL || s == NULL) return NULL;
 
         while(n->type == route) {
@@ -369,26 +374,42 @@ class lfcatree {
 		node<T>* newrb;
 		newrb = b;
 
-		b->lo = lo;
-		b->hi = hi;
-		b->storage = s;
+		newrb->lo = lo;
+		newrb->hi = hi;
+		newrb->storage = s;
+        newrb->type = range;
         return newrb;
 	 }
+
+    void my_test(stack<T>* s) {
+        s->stack_lib = new std::stack<node<T>*>();
+        s->stack_array = new std::vector<node<T>*>();
+    }
 
     // Range Query
     // Goes through all base nodes that may contain items in range in ascending
     // key order. Replaces each base node by type `range_base` to indicate that it
     // is part of a range query.
     std::vector<T>* all_in_range(lfcat<T>* t, int lo, int hi, rs<T>* help_s) {
-    	stack<T>* s;
-    	stack<T>* backup_s;
-    	stack<T>* done;
+    	stack<T> s;
+    	stack<T> backup_s;
+    	stack<T> done;
     	node<T>* b;
     	rs<T>* my_s;
 
-        find_first:b = find_base_stack((&t->root)->load(),lo,s); // Find base nodes
+        stack<T> yo;
+        my_test(&yo);
+
+
+        find_first:b = find_base_stack((&t->root)->load(),lo,&s); // Find base nodes
+                lock.lock();
+                std::cout << "uh" << s.stack_lib << "\n";
+                lock.unlock();
 
     	if(help_s != NULL) { // result storage
+            lock.lock();
+            std::cout << "checkpoint5" << "\n";
+            lock.unlock();
     		if(b->type != range || help_s != b->storage) { // update result query
     			return (&help_s->result)->load();
     		} else { // is a range base and storage has been set by another thread
@@ -399,56 +420,97 @@ class lfcatree {
             my_s->more_than_one_base = false;
     		node<T>* n = new_range_base(b, lo, hi, my_s); // new range base with updated result storage
 
-    		if(!try_replace(t, b, n)) goto find_first; // reset range query
+    		if(!try_replace(t, b, n)) {
+                goto find_first; // reset range query
+            }
+                lock.lock();
+                std::cout << "checkpoint6" << "\n";
+                lock.unlock();
 
-    		replace_top(s, n);
+    		replace_top(&s, n);
     	} else if( b->type == range && b->hi >= hi) { // expand range query
+            lock.lock();
+            std::cout << "checkpoint7" << "\n";
+            lock.unlock();
     		return all_in_range(t, b->lo, b->hi, b->storage);
     	} else {
+            lock.lock();
+            std::cout << "checkpoint8" << "\n";
+            lock.unlock();
     		help_if_needed(t, b);
     		goto find_first;
     	}
 
     	while(true) { // Find remaining base nodes
-	    	push(done, b); // ultimate final result stack (NOT the route nodes)
-	    	backup_s = copy_state(s);
+	    	push(&done, b); // ultimate final result stack (NOT the route nodes)
+	    	backup_s = copy_state(&s);
 
             std::vector<int>::iterator it; // get maximum value
             it = max_element(b->data->begin(), b->data->end());
-	    	if (!b->data->empty() && *it >= hi)
+	    	if (!b->data->empty() && *it >= hi) {
+                lock.lock();
+                std::cout << "\n";
+                for(it = b->data->begin(); it != b->data->end(); ++it) {
+                    std::cout << *it << " ";
+                }
+                std::cout << "\n";
+                lock.unlock();
 				break;
+            }
 
-	    	find_next_base_node: b = find_next_base_stack(s);
-	    	if(b == NULL) break; // out of base nodes
+	    	find_next_base_node: b = find_next_base_stack(&s);
+	    	if(b == NULL) {
+                lock.lock();
+                std::cout << "checkpoint13" << "\n";
+                lock.unlock();
+
+                break; // out of base nodes
+            }
 	    	else if ((&my_s->result)->load() != not_set_status) { // range query is finished
+                lock.lock();
+                std::cout << "checkpoint12" << "\n";
+                lock.unlock();
+
 	    		return (&my_s->result)->load();
 	    	} else if (b->type == range && b->storage == my_s) { // b's storage is the same as the current
+                lock.lock();
+                std::cout << "checkpoint9" << "\n";
+                lock.unlock();
+
 	    		continue;
 	    	} else if (is_replaceable(b)) {
+                lock.lock();
+                std::cout << "checkpoint10" << "\n";
+                lock.unlock();
+
 	    		node<T>* n = new_range_base(b, lo, hi, my_s); // change the type of node b is
 	    		if(try_replace(t, b, n)) {
-	    			replace_top(s, n);
+	    			replace_top(&s, n);
                     continue;
 	    		} else {
-	    			s = copy_state(backup_s); // reset the stack
+	    			s = copy_state(&backup_s); // reset the stack
 	    			goto find_next_base_node;
 	    		}
 	    	} else { // another thread has intercepted; help it out
+                lock.lock();
+                std::cout << "checkpoint11" << "\n";
+                lock.unlock();
+
 	    		help_if_needed(t, b);
-	    		s = copy_state(backup_s); // reset stack
+	    		s = copy_state(&backup_s); // reset stack
 	    		goto find_next_base_node;
 	    	}
     	}
 
-    	std::vector<T>* res = done->stack_array->at(0)->data; // stack array is just an array of nodes
-    	for(int i = 1; i < done->stack_array->size(); i++)
-    		res = vector_join(res, done->stack_array->at(i)->data); // join all the data in the base nodes together
+    	std::vector<T>* res = done.stack_array->at(0)->data; // stack array is just an array of nodes
+    	for(int i = 1; i < done.stack_array->size(); i++)
+    		res = vector_join(res, done.stack_array->at(i)->data); // join all the data in the base nodes together
 
         if((&my_s->result)->compare_exchange_weak(not_set_status, res, // if still not set by another thread, replace
-        std::memory_order_release, std::memory_order_relaxed) && done->stack_lib->size() > 1)
+        std::memory_order_release, std::memory_order_relaxed) && done.stack_lib->size() > 1)
     		(&my_s->more_than_one_base)->store(true);
 
-    	adapt_if_needed(t, done->stack_array->at(rand() % done->stack_array->size()));
+    	adapt_if_needed(t, done.stack_array->at(rand() % done.stack_array->size()));
     	return (&my_s->result)->load();
     }
 
