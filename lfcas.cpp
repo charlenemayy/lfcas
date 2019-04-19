@@ -12,72 +12,67 @@
  * http://user.it.uu.se/~bengt/Papers/Full/spaa18.pdf
  * https://github.com/kjellwinblad/JavaRQBench
  */
-
 #include "lfcas.h"
 
 template <class T>
 class lfcatree {
 	//=== Help Functions ================================
 	private:
-	treap<T>* lfcatreap;
-
-    // All
-    // Load atomic variable.
-    T aload(T &t) {
-        node<T>* a = *t.load();
-        std::cout << &t << " " << *t << " " << a;
-        return a;
-    }
-
-    // All
-    // Store atomic variable.
-    void astore(T &t, T &s) {
-        *t.store(*s);
-        return;
-    }
-
-    // All
-    bool CAS(node<T>* expected, node<T>* actual, node<T>* replace) {
-       return expected->compare_exchange_weak(actual, replace,
-              std::memory_order_release, std::memory_order_relaxed);
-    }
-
     // Insertion and Removal
     // Does a CAS to attempt to change the pointer of the base node's parent to
     // a new base node with the updated leaf container.
     bool try_replace(lfcat<T>* m, node<T>* b, node<T>* new_b) {
-	    if( b->parent == NULL )
-	        return CAS(&m->root, b, new_b);
-	    else if(aload(&b->parent->left) == b)
-	        return CAS(&b->parent->left, b, new_b);
-	    else if(aload(&b->parent->right) == b)
-	        return CAS(&b->parent->right, b, new_b);
-	    else return false;
+	    if(b->parent == NULL) {
+            lock.lock();
+            std::cout << "checkpoint" << "\n";
+            lock.unlock();
+	        return (&m->root)->compare_exchange_weak(b, new_b, // cas
+                   std::memory_order_release, std::memory_order_relaxed);
+        } else if((&b->parent->left)->load() == b) {
+            lock.lock();
+            std::cout << "checkpoint1" << "\n";
+            lock.unlock();
+	        return (&b->parent->left)->compare_exchange_weak(b, new_b, // cas
+                   std::memory_order_release, std::memory_order_relaxed);
+        } else if((&b->parent->right)->load() == b) {
+            lock.lock();
+            std::cout << "checkpoint2" << "\n";
+            lock.unlock();
+	        return (&b->parent->right)->compare_exchange_weak(b, new_b, // cas
+                   std::memory_order_release, std::memory_order_relaxed);
+        } else {
+            lock.lock();
+            std::cout << "checkpoint3" << "\n";
+            lock.unlock();
+            return false; }
 	}
 
     // Insertion and Removal || Range Query
     // True if not in the first part of a join or not in a range query (where
     // its result is not set).
 	bool is_replaceable(node<T>* n) {
-	    return (n->type == normal ||
+	    bool status = (n->type == normal ||
 	    (n->type == joinmain &&
-	      aload(&n->neigh2) == ABORTED) ||
+	      (&n->neigh2)->load() == aborted_status) ||
 	    (n->type == joinneighbor &&
-	     (aload(&n->main_node->neigh2) == ABORTED ||
-	      aload(&n->main_node->neigh2) == DONE)) ||
+	     ((&n->main_node->neigh2)->load() == aborted_status ||
+	      (&n->main_node->neigh2)->load() == done_status)) ||
 	    (n->type == range &&
-	     aload(&n->storage ->result) != NOT_SET));
+	     (&n->storage->result)->load() != not_set_status));
+        return status;
 	}
 
     // Insertion and Removal
     // Help other thread complete their function and guarantee progress.
-    void help_if_needed(lfcatree* t, node<T>* n) {
+    void help_if_needed(lfcat<T>* t, node<T>* n) {
         if(n->type == joinneighbor) n = n->main_node; // Node is in the middle of a join
-        if(n->type == joinmain && aload(&n->neigh2) == PREPARING) { // The neighbor of n has been joined
-        	CAS(&n->neigh2 , PREPARING , ABORTED);
-        } else if(n->type == joinmain && aload(&n->neigh2) > ABORTED) { // Help the second phase of the join
+        if(n->type == joinmain && (&n->neigh2)->load() == preparing_status) { // The neighbor of n has been joined
+            (&n->neigh2)->compare_exchange_weak(preparing_status, aborted_status, // cas todo
+            std::memory_order_release, std::memory_order_relaxed);
+
+        } else if(n->type == joinmain && (&n->neigh2)->load() > aborted_status) { // Help the second phase of the join
         	complete_join(t, n);
-        } else if(n->type == range && aload(&n->storage ->result) == NOT_SET) { // Help the range query
+        } else if(n->type == range && (&n->storage->result)->load() == not_set_status) { // Help the range query
         	all_in_range(t, n->lo, n->hi, n->storage);
         }
     }
@@ -87,7 +82,7 @@ class lfcatree {
     // contention. Make more fine-grained in high contention and vice versa.
     int new_stat(node<T>* n, contention_info info) {
     	int range_sub = 0;
-    	if(n->type == range && aload(&n->storage ->more_than_one_base))
+    	if(n->type == range && (&n->storage->more_than_one_base)->load())
     		range_sub = RANGE_CONTRIB;
     	if (info == contended && n->stat <= HIGH_CONT) {
     		return n->stat + CONT_CONTRIB - range_sub;
@@ -98,7 +93,7 @@ class lfcatree {
 
     // Insertion and Removal || Range Query
     // Begin the process of adaptation
-    void adapt_if_needed(lfcatree* t, node<T>* b) {
+    void adapt_if_needed(lfcat<T>* t, node<T>* b) {
     	if(!is_replaceable(b)) return;
     	else if(new_stat(b, noinfo) > HIGH_CONT)
     		high_contention_adaptation(t, b);
@@ -111,18 +106,25 @@ class lfcatree {
     // replacement attempt is made only if the found base node is replacable.
     // If it is not, it may be involved in another operation, and `do_update`
     // will first attempt to help this operation before proceeding.
-    bool do_update(lfcatree* m, treap<T>*(*u)(treap<T>*,int,bool*), int i) {
+    bool do_update(lfcat<T>* m, char mode, int i) {
     	contention_info cont_info = uncontened;
 		node<T>* base;
+
     	while(true) {
-    		base = find_base_node(aload(&m->root), i);
+    		base = find_base_node((&m->root)->load(), i);
     		if(is_replaceable(base)) {
  	   			bool res;
     			node<T>* newb;
+                newb = new node<T>();
 
-    			newb->node_type = normal;
+    			newb->type = normal;
 				newb->parent = base->parent;
-				newb->data = u(base->data, i, &res);
+
+                if(mode == 'i')
+				    newb->data = vector_insert(base->data, i, &res); // treap, int, boolean
+                else if (mode == 'r')
+				    newb->data = vector_remove(base->data, i, &res); // treap, int, boolean
+
 				newb->stat = new_stat(base, cont_info);
     			if(try_replace(m, base, newb)) {
     				adapt_if_needed(m, newb);
@@ -134,10 +136,79 @@ class lfcatree {
     	help_if_needed(m, base);
     }
 
+    //=== Vector Functions ==========================
+    // Insertion and Removal
+    std::vector<T>* vector_insert(std::vector<T>* node_data, int i, bool* res) {
+        std::vector<T>* new_data = node_data;
+        new_data->push_back(i);
+        *res = true;
+        return new_data;
+    }
+
+    // Insertion and Removal
+    std::vector<T>* vector_remove(std::vector<T>* node_data, int i, bool* res) {
+        std::vector<T>* new_data = node_data;
+        new_data->erase(std::remove(new_data->begin(), new_data->end(), i));
+        *res = true;
+        return new_data;
+    }
+
+    // Lookup
+    T vector_lookup(std::vector<T>* node_data, int i) {
+        std::vector<T>* new_data = node_data;
+        std::vector<int>::iterator it;
+        it = std::find(node_data->begin(), node_data->end(), i);
+        return *it;
+    }
+
+    // Range Query
+    void vector_query(std::vector<T>* result) {
+        lock.lock();
+        std::cout << result << "\n";
+        lock.unlock();
+    }
+
+    // Range Query || Adaptations
+    std::vector<T>* vector_join(std::vector<T>* a, std::vector<T>* b) {
+        std::vector<T>* ab;
+        ab->reserve(a->size() + b->size() ); // preallocate memory
+        ab->insert( ab->end(), a->begin(), a->end() );
+        ab->insert( ab->end(), b->begin(), b->end() );
+        return ab;
+    }
+
+    // Adaptations
+    // Get a suitable median value for the left and right base nodes' route node.
+    int split_key(std::vector<T>* data) {
+        return data->at(data->size() / 2);
+    }
+
+    // Adaptations
+    // Split the data in half less than the route node key's value.
+    std::vector<T>* split_left(std::vector<T>* data, int key) {
+        std::vector<int>::iterator it;
+        it = std::find(data->begin(), data->end(), key);
+        int index = std::distance(data->begin(), it);
+
+        std::vector<int>* left = new std::vector<int>(data->begin(), data->begin() + index + 1);
+        return left;
+    }
+
+    // Adaptations
+    // Split the data in half greater than the route node key's value.
+    std::vector<T>* split_right(std::vector<T>* data, int key) {
+        std::vector<int>::iterator it;
+        it = std::find(data->begin(), data->end(), key);
+        int index = std::distance(data->begin(), it);
+
+        std::vector<int>* right = new std::vector<int>(data->begin() + index + 1, data->end());
+        return right;
+    }
+
     //=== Stack Functions ===========================
     // Range Query
     stack<T>* stack_reset(stack<T>* s) {
-        s = new stack<T>*();
+        s = new stack<T>();
         // s->stack_array.clear();
         return s;
     }
@@ -145,14 +216,15 @@ class lfcatree {
     // Range Query
     void push(stack<T>* s, node<T>* n) {
         s->stack_lib->push(n);
-        s->stack_array.insert(s->stack_array.begin(), n);
+        s->stack_array->insert(s->stack_array->begin(), n);
         return;
     }
 
     // Range Query
     node<T>* pop(stack<T>* s) {
-        node<T>* n = s->stack_lib->pop();
-        s->stack_array.erase(s->stack_array.begin());
+        node<T>* n = s->stack_lib->top();
+        s->stack_lib->pop();
+        s->stack_array->erase(s->stack_array->begin());
         return n;
     }
 
@@ -163,60 +235,72 @@ class lfcatree {
 
     // Range Query
     void replace_top(stack<T>* s, node<T>* n) {
-        pop(s->stack);
-        push(s->stack, n);
+        pop(s);
+        push(s, n);
     }
 
     // Range Query
     stack<T>* copy_state(stack<T>* s) {
-        stack<T>* q = new stack<T>*();
+        stack<T>* q = new stack<T>();
         q->stack_lib = s->stack_lib;
         q->stack_array = s->stack_array;
         return s;
     }
 
-    //=== Treap Functions ===========================
-
     //=== Public Interface ==========================
 	public:
-	lfcatree() { // TO-DO: constructor
-	}
+    std::mutex lock;
+    node<T>* preparing_status;
+    node<T>* done_status;
+    node<T>* aborted_status;
+    std::vector<T>* not_set_status;
+
+    lfcatree() {
+        preparing_status = (node<T>*)0;
+        done_status = (node<T>*)1;
+        aborted_status = (node<T>*)2;
+        std::vector<T>* not_set_status = (std::vector<T>*)1;
+    }
 
     // Insertion and Removal
     bool insert(lfcat<T>* m, int i) {
-    	return do_update(m, lfcatreap->insert, i);
+    	return do_update(m, 'i', i);
     }
 
     // Insertion and Removal
     bool remove(lfcat<T>* m, int i) {
-    	return do_update(m, lfcatreap->remove, i);
+    	return do_update(m, 'r', i);
     }
 
     // Lookup
     // Wait free. Traverses route nodes until base node is found, then performs
     // lookup in the corresponding immutable data structure.
     bool lookup(lfcat<T>* m, int i) {
-    	node<T>* base = find_base_node(aload(&m->root), i);
-    	return lfcatreap->lookup(base->data, i);
+    	node<T>* base = find_base_node((&m->root)->load(), i);
+    	return vector_lookup(base->data, i);
     }
 
     // Range Query
     // Creates a snapshot of all base nodes in the requested range, then
     // traverses the snapshot to complete the range query
-    void query(lfcat<T>* m, int lo, int hi, void (*trav)(int, void*), void* aux) {
-    	treap<T>* result = all_in_range(m, lo, hi, NULL);
-    	lfcatreap->query(result , lo, hi, trav, aux);
+    void query(lfcat<T>* m, int lo, int hi) {
+    	std::vector<T>* result = all_in_range(m, lo, hi, NULL);
+    	vector_query(result);
     }
 
     // Lookup || Insertion and Removal
     // Finds base nodes but does not push the results to a stack like with
     // the range query functions below.
     node<T>* find_base_node(node<T>* n, int i) {
+        if(n == NULL) return NULL;
+
         while(n->type == route) {
             if(i < n->key) {
-                n = aload(&n->left);
+                if(n->left == NULL) break;
+                n = (&n->left)->load();
             } else {
-                n = aload(&n->right);
+                if(n->right == NULL) break;
+                n = (&n->right)->load();
             }
         }
         return n;
@@ -227,12 +311,16 @@ class lfcatree {
     // stack s to store the search path to the current base node.
     node<T>* find_base_stack(node<T>* n, int i, stack<T>* s) {
         s = stack_reset(s);
+        if(n == NULL || s == NULL) return NULL;
+
         while(n->type == route) {
             push(s, n);
-            if (i < n->key) {
-                n = aload(&n->left);
+            if(i < n->key) {
+                if(n->left == NULL) break;
+                n = (&n->left)->load();
             } else {
-                n = aload(&n->right);
+                if(n->right == NULL) break;
+                n = (&n->right)->load();
             }
         }
         push(s, n);
@@ -248,13 +336,13 @@ class lfcatree {
     	node<T>* t = top(s);
     	if(t == NULL) return NULL;
 
-    	if(aload(&t->left) == base)
-    		return leftmost_and_stack(aload(&t->right), s);
+    	if((&t->left)->load() == base)
+    		return leftmost_and_stack((&t->right)->load(), s);
 
     	int be_greater_than = t->key;
     	while(t != NULL) {
-    		if(aload(&t->valid) && t->key > be_greater_than)
-    			return leftmost_and_stack(aload(&t->right), s);
+    		if((&t->valid)->load() && t->key > be_greater_than)
+    			return leftmost_and_stack((&t->right)->load(), s);
     		else {
 				pop(s);
                 t = top(s);
@@ -268,7 +356,7 @@ class lfcatree {
     node<T>* leftmost_and_stack(node<T>* n, stack<T>* s) {
         while (n->type == route) {
             push(s, n);
-            n = aload(&n->left);
+            n = (&n->left)->load();
         }
 
         push(s, n);
@@ -284,29 +372,31 @@ class lfcatree {
 		b->lo = lo;
 		b->hi = hi;
 		b->storage = s;
+        return newrb;
 	 }
 
     // Range Query
     // Goes through all base nodes that may contain items in range in ascending
     // key order. Replaces each base node by type `range_base` to indicate that it
     // is part of a range query.
-    treap<T>* all_in_range(lfcat<T>* t, int lo, int hi, rs<T>* help_s) {
+    std::vector<T>* all_in_range(lfcat<T>* t, int lo, int hi, rs<T>* help_s) {
     	stack<T>* s;
     	stack<T>* backup_s;
     	stack<T>* done;
     	node<T>* b;
     	rs<T>* my_s;
 
-        find_first:b = find_base_stack(aload(&t->root),lo,s); // Find base nodes
+        find_first:b = find_base_stack((&t->root)->load(),lo,s); // Find base nodes
 
     	if(help_s != NULL) { // result storage
     		if(b->type != range || help_s != b->storage) { // update result query
-    			return aload(&help_s->result);
+    			return (&help_s->result)->load();
     		} else { // is a range base and storage has been set by another thread
 				 my_s = help_s;
 			}
-    	} else if(is_replaceable(b)) { // result field != NOT_SET
+    	} else if(is_replaceable(b)) { // result field != not_set_status
     		my_s = new rs<T>;
+            my_s->more_than_one_base = false;
     		node<T>* n = new_range_base(b, lo, hi, my_s); // new range base with updated result storage
 
     		if(!try_replace(t, b, n)) goto find_first; // reset range query
@@ -320,15 +410,18 @@ class lfcatree {
     	}
 
     	while(true) { // Find remaining base nodes
-	    	push(done, b); // ultimate final result stack
+	    	push(done, b); // ultimate final result stack (NOT the route nodes)
 	    	backup_s = copy_state(s);
-	    	if (!empty(b->data) && max(b->data) >= hi)
+
+            std::vector<int>::iterator it; // get maximum value
+            it = max_element(b->data->begin(), b->data->end());
+	    	if (!b->data->empty() && *it >= hi)
 				break;
 
 	    	find_next_base_node: b = find_next_base_stack(s);
 	    	if(b == NULL) break; // out of base nodes
-	    	else if (aload(&my_s->result) != NOT_SET) { // range query is finished
-	    		return aload(&my_s->result);
+	    	else if ((&my_s->result)->load() != not_set_status) { // range query is finished
+	    		return (&my_s->result)->load();
 	    	} else if (b->type == range && b->storage == my_s) { // b's storage is the same as the current
 	    		continue;
 	    	} else if (is_replaceable(b)) {
@@ -347,30 +440,33 @@ class lfcatree {
 	    	}
     	}
 
-    	treap<T>* res = done->stack_array[0]->data; // stack array is just an array of nodes
-    	for(int i = 1; i < done->size; i++)
-    		res = treap_join(res, done->stack_array[i]->data); // join all the data in the base nodes together
+    	std::vector<T>* res = done->stack_array->at(0)->data; // stack array is just an array of nodes
+    	for(int i = 1; i < done->stack_array->size(); i++)
+    		res = vector_join(res, done->stack_array->at(i)->data); // join all the data in the base nodes together
 
-    	if(CAS(&my_s->result, NOT_SET, res) && done->size > 1) // if still not set by another thread, replace
-    		astore(&my_s->more_than_one_base , true);
+        if((&my_s->result)->compare_exchange_weak(not_set_status, res, // if still not set by another thread, replace
+        std::memory_order_release, std::memory_order_relaxed) && done->stack_lib->size() > 1)
+    		(&my_s->more_than_one_base)->store(true);
 
-    	adapt_if_needed(t, done->array[rand() % done->size]);
-    	return aload(&my_s->result);
+    	adapt_if_needed(t, done->stack_array->at(rand() % done->stack_array->size()));
+    	return (&my_s->result)->load();
     }
 
     // Adaptations
     node<T>* deep_copy(node<T>* b) {
-        node<T>* a = new node<T>*();
+        node<T>* a = new node<T>();
         a->data = b->data;
         a->stat = b->stat;
         a->parent = b->parent;
         a->lo = b->lo; a->hi = b->hi;
         a->storage = b->storage;
         a->neigh1 = b->neigh1;
-        a->neigh2 = b->neigh2;
         a->gparent = b->gparent;
         a->otherb = b->otherb;
         a->main_node = b->main_node;
+
+        node<T>* neigh2 = b->neigh2.load(); // cant copy atomics
+        (&a->neigh2)->store(neigh2);
 
         return a;
     }
@@ -378,22 +474,30 @@ class lfcatree {
     // Adaptations
     node<T>* leftmost(node<T>* n) {
         while (n->type == route) {
-            n = aload(&n->left);
+            n = (&n->left)->load();
         }
         return n;
     }
 
     // Adaptations
-    node<T>* parent_of(lfcatree* t, node<T>* n) {
+    node<T>* rightmost(node<T>* n) {
+        while (n->type == route) {
+            n = (&n->right)->load();
+        }
+        return n;
+    }
+
+    // Adaptations
+    node<T>* parent_of(lfcat<T>* t, node<T>* n) {
         node<T>* prev_node = NULL;
-        node<T>* curr_node = aload(&t->root);
+        node<T>* curr_node = (&t->root)->load();
 
         while(curr_node != n && curr_node->type == route) {
             prev_node = curr_node;
             if(n->key < curr_node->key) {
-                curr_node = aload(&curr_node->left);
+                curr_node = (&curr_node->left)->load();
             } else {
-                curr_node = aload(&curr_node->right);
+                curr_node = (&curr_node->right)->load();
             }
         }
 
@@ -407,37 +511,44 @@ class lfcatree {
     // The first phase of the join as described by the paper. Other threads
     // cannot help with this process. The corresponding diagrams are marked
     // on their place in the code.
-    node<T>* secure_join_left(lfcatree* t, node<T>* b) {
-        node<T>* n0 = leftmost(aload(&b->parent->right)); // get the neighboring node on the right
+    node<T>* secure_join_left(lfcat<T>* t, node<T>* b) {
+        node<T>* n0 = leftmost((&b->parent->right)->load()); // get the neighboring node on the right
         if(!is_replaceable(n0)) return NULL;
 
         node<T>* m = deep_copy(b); // m is the main node
         m->type = joinmain; // mark that it is part of a join
 
-        if(!CAS(&b->parent->left, b, m)) return NULL; // check that it's still on the left side and replace it (b)
+        node<T>* nullvalue = nullptr;
+
+        if(!(b->parent->left.compare_exchange_weak(b, m, // check that it's still on the left side and replace it (b)
+        std::memory_order_release, std::memory_order_relaxed))) // cas
+            return NULL;
 
         node<T>* n1 = deep_copy(n0);
         n1->main_node = m; // copy the neighboring node to replace it and change its type to join (c)
 
         if(!try_replace(t, n0, n1)) { // replace the neighboring node
-            astore(&m->neigh2, ABORTED);
+    		(&m->neigh2)->store(aborted_status);
             return NULL;
-        } else if(!CAS(&m->parent->join_id, NULL, m)) { // check that another thread has not attatched
-                                                        // a join id and if not, set it (d)
-            astore(&m->neigh2, ABORTED);
+        } else if(!(m->parent->join_id.compare_exchange_weak(nullvalue, m, // cas
+        std::memory_order_release, std::memory_order_relaxed))) { // check that another thread has not attatched
+                                                                // a join id and if not, set it (d)
+    		(&m->neigh2)->store(aborted_status);
             return NULL;
         }
 
         node<T>* gparent = parent_of(t, m->parent); // set the join ids of the parents and grandparents to
                                                     // indicate that it is part of a join
         if(gparent == NOT_FOUND ||
-          (gparent != NULL && !CAS(&gparent->join_id,NULL,m))) {
-            astore(&m->parent->join_id, NULL);
+          (gparent != NULL &&
+           !(gparent->join_id.compare_exchange_weak(nullvalue, m, // cas
+           std::memory_order_release, std::memory_order_relaxed)))) {
+    		(&m->parent->join_id)->store(NULL);
             return NULL;
         }
 
         m->gparent = gparent; // set the information used for complete_join
-        m->otherb = aload(&m->parent->right); // set to the actual value of right neighbor
+        m->otherb = (&m->parent->right)->load(); // set to the actual value of right neighbor
         m->neigh1 = n1; // set to the expected value of the right neighbor
 
         node<T>* joinedp = m->otherb==n1 ? gparent: n1->parent; // set the main node's neigh2 field to n2, which
@@ -446,15 +557,16 @@ class lfcatree {
         node<T>* n2 = deep_copy(n1);
         n2->parent = joinedp;
         n2->main_node = m;
-        n2->data = treap_join(m, n1); // TO-DO: join the data in the two nodes
+        n2->data = vector_join(m->data, n1->data);
 
-        if(CAS(&m->neigh2, PREPARING, n2)) return m; // should end here if CAS is successful
+        if(m->neigh2.compare_exchange_weak(preparing_status, n2,
+          std::memory_order_release, std::memory_order_relaxed)) return m; // should end here if CAS is successful
 
         if(gparent == NULL) {
-            astore(&m->parent->join_id, NULL);
+    		(&m->parent->join_id)->store(NULL);
             return NULL;
         }
-        astore(&gparent->join_id, NULL);
+    	(&gparent->join_id)->store(NULL);
 
         return NULL;
     }
@@ -463,37 +575,43 @@ class lfcatree {
     // The first phase of the join as described by the paper. Other threads
     // cannot help with this process. The corresponding diagrams are marked
     // on their place in the code.
-    node<T>* secure_join_right(lfcatree* t, node<T>* b) {
-        node<T>* n0 = rightmost(aload(&b->parent->left)); // get the neighboring node on the left
+    node<T>* secure_join_right(lfcat<T>* t, node<T>* b) {
+        node<T>* n0 = rightmost((&b->parent->left)->load()); // get the neighboring node on the left
         if(!is_replaceable(n0)) return NULL;
 
         node<T>* m = deep_copy(b); // m is the main node
         m->type = joinmain; // mark that it is part of a join
 
-        if(!CAS(&b->parent->right, b, m)) return NULL; // check that it's still on the right side and replace it (b)
+        node<T>* nullvalue = nullptr;
+
+        if(!(b->parent->right.compare_exchange_weak(b, m,
+          std::memory_order_release, std::memory_order_relaxed))) return NULL;
 
         node<T>* n1 = deep_copy(n0);
         n1->main_node = m; // copy the neighboring node to replace it and change its type to join (c)
 
         if(!try_replace(t, n0, n1)) { // replace the neighboring node
-            astore(&m->neigh2, ABORTED);
+    		(&m->neigh2)->store(aborted_status);
             return NULL;
-        } else if(!CAS(&m->parent->join_id, NULL, m)) { // check that another thread has not attatched
-                                                        // a join id and if not, set it (d)
-            astore(&m->neigh2, ABORTED);
+        } else if(!(m->parent->join_id.compare_exchange_weak(nullvalue, m,
+                 std::memory_order_release, std::memory_order_relaxed))) { // check that another thread has not attatched
+                                                                          // a join id and if not, set it (d)
+    		(&m->neigh2)->store(aborted_status);
             return NULL;
         }
 
         node<T>* gparent = parent_of(t, m->parent); // set the join ids of the parents and grandparents to
                                                     // indicate that it is part of a join
         if(gparent == NOT_FOUND ||
-          (gparent != NULL && !CAS(&gparent->join_id,NULL,m))) {
-            astore(&m->parent->join_id, NULL);
+          (gparent != NULL &&
+           !(gparent->join_id.compare_exchange_weak(nullvalue, m,
+           std::memory_order_release, std::memory_order_relaxed)))) {
+    		(&m->parent->join_id)->store(NULL);
             return NULL;
         }
 
         m->gparent = gparent; // set the information used for complete_join
-        m->otherb = aload(&m->parent->left); // set to the actual value of left neighbor
+        m->otherb = (&m->parent->left)->load(); // set to the actual value of left neighbor
         m->neigh1 = n1; // set to the expected value of the left neighbor
 
         node<T>* joinedp = m->otherb==n1 ? gparent: n1->parent; // set the main node's neigh2 field to n2, which
@@ -502,15 +620,16 @@ class lfcatree {
         node<T>* n2 = deep_copy(n1);
         n2->parent = joinedp;
         n2->main_node = m;
-        n2->data = treap_join(m, n1); // TO-DO: join the data in the two nodes
+        n2->data = vector_join(m->data, n1->data);
 
-        if(CAS(&m->neigh2, PREPARING, n2)) return m; // should end here if CAS is successful
+        if(m->neigh2.compare_exchange_weak(preparing_status, n2, // should end here if CAS is successful
+            std::memory_order_release, std::memory_order_relaxed)) return m;
 
         if(gparent == NULL) {
-            astore(&m->parent->join_id, NULL);
+    		(&m->parent->join_id)->store(NULL);
             return NULL;
         }
-        astore(&gparent->join_id, NULL);
+        (&gparent->join_id)->store(NULL);
 
         return NULL;
     }
@@ -518,86 +637,236 @@ class lfcatree {
     // Adaptation
     // The second part of the join. Multiple threads can help out this
     // part of the join.
-    void complete_join(lfcatree* t, node<T>* m) {
-        node<T>* n2 = aload(&m->neigh2);
+    void complete_join(lfcat<T>* t, node<T>* m) {
+        node<T>* n2 = (&m->neigh2)->load();
 
-        if(n2 == DONE) return;
+        if(n2 == done_status) return;
 
         try_replace(t, m->neigh1, n2); // replace the neighbor node (f)
-        astore(&m->parent->valid, false); // mark the main node's parent as false to prevent other threads from
+    	(&m->parent->valid)->store(false); // mark the main node's parent as false to prevent other threads from
                                           // traversing to it
         node<T>* replacement = (m->otherb == m->neigh1) ? n2 : m->otherb; // check that the neighbor node that was
                                                                           // replaced wasn't changed by another thread
         if (m->gparent == NULL) { // parent is spliced out in the following condition statements (g)
-            CAS(&t->root, m->parent, replacement); // replacement is the node with the merged data
-        } else if(aload(&m->gparent->left) == m->parent) {
-            CAS(&m->gparent->left, m->parent, replacement);
-            CAS(&m->gparent->join_id, m, NULL);
-        } else if(aload(&m->gparent->right) == m->parent) {
-            CAS(&m->gparent->right, m->parent, replacement);
-            CAS(&m->gparent->join_id, m, NULL);
+            (&t->root)->compare_exchange_weak(m->parent, replacement, // replacement is the node with the merged data
+             std::memory_order_release, std::memory_order_relaxed);
+        } else if((&m->gparent->left)->load() == m->parent) {
+            (&m->gparent->left)->compare_exchange_weak(m->parent, replacement,
+             std::memory_order_release, std::memory_order_relaxed);
+
+            (&m->gparent->join_id)->compare_exchange_weak(m, NULL,
+             std::memory_order_release, std::memory_order_relaxed);
+        } else if((&m->gparent->right)->load() == m->parent) {
+            (&m->gparent->right)->compare_exchange_weak(m->parent, replacement,
+             std::memory_order_release, std::memory_order_relaxed);
+
+            (&m->gparent->join_id)->compare_exchange_weak(m, NULL,
+             std::memory_order_release, std::memory_order_relaxed);
         }
-        astore(&m->neigh2, DONE); // n2 is now marked as replacable and the join has been completed (h)
+    	(&m->neigh2)->store(done_status); // n2 is now marked as replacable and the join has been completed (h)
     }
 
     // Adaptations
     // Join the contents of two base nodes into one base node
-    void low_contention_adaptation(lfcatree* t, node<T>* b) {
+    void low_contention_adaptation(lfcat<T>* t, node<T>* b) {
         if(b->parent == NULL) return;
-        if(aload(&b->parent->left) == b) { // check what side the node is on
+        if((&b->parent->left)->load() == b) { // check what side the node is on
             node<T>* m = secure_join_left(t, b);
             if (m != NULL) complete_join(t, m);
-        } else if (aload(&b->parent->right) == b) { // check what side the node is on
+        } else if ((&b->parent->right)->load() == b) { // check what side the node is on
             node<T>* m = secure_join_right(t, b);
             if (m != NULL) complete_join(t, m);
         }
     }
 
     // Adaptations
-    // Get a suitable median value for the left and right base nodes' route node.
-    int split_key(treap<T>* data) {
-        return 0;
-    }
-
-    // Adaptations
-    // Split the data in half less than the route node key's value.
-    int split_left(treap<T>* data, int key) {
-        return 0;
-    }
-
-    // Adaptations
-    // Split the data in half greater than the route node key's value.
-    int split_right(treap<T>* data, int key) {
-        return 0;
-    }
-
-    // Adaptations
     // Split the contents of one base node into two base nodes
-    void high_contention_adaptation(lfcatree* m, node<T>* b) {
-        if(less_than_two_items(b->data)) return;
-        node<T>* r = new node<T>*(); // create new route node to hold two new base nodes
-        r->type = route;
-        r->key = split_key(b->data); // TO-DO
+    void high_contention_adaptation(lfcat<T>* m, node<T>* b) {
+        if(b->data->size() < 2) return;
 
-        node<T>* left = new node<T>*();
+        std::vector<T>* data = b->data;
+        std::sort(data->begin(), data->end());
+
+        node<T>* r = new node<T>(); // create new route node to hold two new base nodes
+        r->type = route;
+        r->key = split_key(data);
+        r->valid = true;
+
+        node<T>* left = new node<T>();
         left->type = normal;
         left->parent = r;
         left->stat = 0;
-        left->data = split_left(b->data, r->key); // TO-DO
+        left->data = split_left(data, r->key);
         r->left = left;
 
-        node<T>* right = new node<T>*();
+        node<T>* right = new node<T>();
         right->type = normal;
         right->parent = r;
         right->stat = 0;
-        right->data = split_right(b->data, r->key); // TO-DO
+        right->data = split_right(data, r->key);
         r->right = right;
 
         try_replace(m, b, r);
     }
+
+    //=== Test Functions ================================
+    node<T>* new_route_node(T key) {
+        node<T>* r = new node<T>();
+        r->key = key;
+        r->type = route;
+        return r;
+    }
+
+    node<T>* new_base_node(std::vector<T>* data) {
+        node<T>* b = new node<T>();
+        b->data = data;
+        b->type = normal;
+        return b;
+    }
+
+    void test() {
+        node<T>* r0 = new_route_node(70); // fill the lfca tree with data
+        node<T>* r1 = new_route_node(40);
+        node<T>* r2 = new_route_node(80);
+        node<T>* r3 = new_route_node(60);
+
+        std::vector<int>* r1_ldata = new std::vector<int>{35, 36, 37};
+        std::vector<int>* r2_ldata = new std::vector<int>{75, 76, 77};
+        std::vector<int>* r2_rdata = new std::vector<int>{85, 86, 87};
+        std::vector<int>* r3_ldata = new std::vector<int>{55, 56, 57};
+        std::vector<int>* r3_rdata = new std::vector<int>{65, 66, 67};
+
+        node<T>* r1_lbase = new_base_node(r1_ldata);
+        node<T>* r2_lbase = new_base_node(r2_ldata);
+        node<T>* r2_rbase = new_base_node(r2_rdata);
+        node<T>* r3_lbase = new_base_node(r3_ldata);
+        node<T>* r3_rbase = new_base_node(r3_rdata);
+
+        r0->left = r1;
+        r0->right = r2;
+
+        r1->parent = r0;
+        r1->left = r1_lbase;
+        r1->right = r3;
+
+        r2->parent = r0;
+        r2->left = r2_lbase;
+        r2->right = r2_rbase;
+
+        r3->parent = r1;
+        r3->left = r3_lbase;
+        r3->right = r3_rbase;
+
+        r1_lbase->parent = r1;
+        r2_lbase->parent = r2;
+        r2_rbase->parent = r2;
+        r3_lbase->parent = r3;
+        r3_rbase->parent = r3;
+
+        lfcat<T>* tree = new lfcat<T>();
+        tree->root = r0;
+
+        pthread_t threads[NUM_THREADS];
+        struct arg_struct<T> args[NUM_THREADS];
+
+        // Insert
+        for (int i = 0; i < NUM_THREADS; i++) {
+            args[i].tid = i;
+            args[i].tree = tree;
+            args[i].self = this;
+            pthread_create(&threads[i], NULL, insert_test, (void *)&args[i]);
+        }
+        for (int i = 0; i < NUM_THREADS; i++) {
+            pthread_join(threads[i], NULL);
+        }
+
+        // Lookups
+        for (int i = 0; i < NUM_THREADS; i++) {
+            pthread_create(&threads[i], NULL, lookup_test, (void *)&args[i]);
+        }
+        for (int i = 0; i < NUM_THREADS; i++) {
+            pthread_join(threads[i], NULL);
+        }
+
+        // Range Queries
+        for (int i = 0; i < NUM_THREADS; i++) {
+            pthread_create(&threads[i], NULL, query_test, (void *)&args[i]);
+        }
+        for (int i = 0; i < NUM_THREADS; i++) {
+            pthread_join(threads[i], NULL);
+        }
+
+        // Remove
+        for (int i = 0; i < NUM_THREADS; i++) {
+            args[i].tid = i;
+            args[i].tree = tree;
+            pthread_create(&threads[i], NULL, remove_test, (void *)&args[i]);
+        }
+        for (int i = 0; i < NUM_THREADS; i++) {
+            pthread_join(threads[i], NULL);
+        }
+    }
+
+    static void *insert_test(void* args) {
+        struct arg_struct<T> *info = (struct arg_struct<T>*)args;
+        int tid = info->tid;
+        lfcat<T>* tree = info->tree;
+        void *self = info->self;
+
+        printf("starting insertion for thread %d\n", tid);
+
+        for(int i = 0; i < NUM_UPDATE; i++) {
+            static_cast <lfcatree<T>*>(self)->insert(tree, (tid * 10) + i);
+        }
+        pthread_exit(NULL);
+    }
+
+    static void *lookup_test(void* args) {
+        struct arg_struct<T> *info = (struct arg_struct<T>*)args;
+        int tid = info->tid;
+        lfcat<T>* tree = info->tree;
+        void *self = info->self;
+
+        printf("starting lookup for thread %d\n", tid);
+
+        for(int i = 0; i < NUM_LOOKUP; i++) {
+            static_cast <lfcatree<T>*>(self)->lookup(tree, (tid * 10) + i);
+        }
+        pthread_exit(NULL);
+    }
+
+    static void *query_test(void* args) {
+        struct arg_struct<T> *info = (struct arg_struct<T>*)args;
+        int tid = info->tid;
+        lfcat<T>* tree = info->tree;
+        void *self = info->self;
+
+        printf("starting query for thread %d\n", tid);
+
+        for(int i = 0; i < NUM_QUERY; i++) {
+            static_cast <lfcatree<T>*>(self)->query(tree, (tid * 10), (tid * 10) + 9);
+        }
+        pthread_exit(NULL);
+    }
+
+   static void *remove_test(void* args) {
+        struct arg_struct<T> *info = (struct arg_struct<T>*)args;
+        int tid = info->tid;
+        lfcat<T>* tree = info->tree;
+        void *self = info->self;
+
+        printf("starting removal for thread %d\n", tid);
+
+        for(int i = 0; i < NUM_UPDATE; i++) {
+            static_cast <lfcatree<T>*>(self)->remove(tree, (tid * 10) + i);
+        }
+        pthread_exit(NULL);
+    }
 };
 
 int main () {
-    std::cout << "Yo!! Yo!!" << std::endl;
+    lfcatree<int> lfca;
+    lfca.test();
     return 0;
 }
+
