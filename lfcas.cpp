@@ -48,7 +48,8 @@ class lfcatree {
             lock.lock();
             std::cout << "checkpoint3" << "\n";
             lock.unlock();
-            return false; }
+            return false;
+        }
 	}
 
     // Insertion and Removal || Range Query
@@ -69,6 +70,7 @@ class lfcatree {
     // Insertion and Removal
     // Help other thread complete their function and guarantee progress.
     void help_if_needed(lfcat<T>* t, node<T>* n) {
+        if(n == NULL || t == NULL) return;
         if(n->type == joinneighbor) n = n->main_node; // Node is in the middle of a join
         if(n->type == joinmain && (&n->neigh2)->load() == preparing_status) { // The neighbor of n has been joined
             (&n->neigh2)->compare_exchange_weak(preparing_status, aborted_status, // cas todo
@@ -77,6 +79,9 @@ class lfcatree {
         } else if(n->type == joinmain && (&n->neigh2)->load() > aborted_status) { // Help the second phase of the join
         	complete_join(t, n);
         } else if(n->type == range && (&n->storage->result)->load() == not_set_status) { // Help the range query
+                lock.lock();
+                std::cout << "node " << n->type << "\n";
+                lock.unlock();
         	all_in_range(t, n->lo, n->hi, n->storage);
         }
     }
@@ -98,11 +103,22 @@ class lfcatree {
     // Insertion and Removal || Range Query
     // Begin the process of adaptation
     void adapt_if_needed(lfcat<T>* t, node<T>* b) {
-    	if(!is_replaceable(b)) return;
-    	else if(new_stat(b, noinfo) > HIGH_CONT)
+    	if(!is_replaceable(b)) {
+                lock.lock();
+                std::cout << "checkpoint16" << "\n";
+                lock.unlock();
+            return;
+        } else if(new_stat(b, noinfo) > HIGH_CONT) {
+                lock.lock();
+                std::cout << "checkpoint17" << "\n";
+                lock.unlock();
     		high_contention_adaptation(t, b);
-    	else if(new_stat(b, noinfo) < LOW_CONT)
+        } else if(new_stat(b, noinfo) < LOW_CONT) {
+                lock.lock();
+                std::cout << "checkpoint18" << "\n";
+                lock.unlock();
     		low_contention_adaptation(t, b);
+        }
     }
 
     // Insertion and Removal
@@ -117,9 +133,6 @@ class lfcatree {
     	while(true) {
     		base = find_base_node((&m->root)->load(), i);
     		if(is_replaceable(base)) {
-                lock.lock();
-                std::cout << "hello" << "\n";
-                lock.unlock();
  	   			bool res;
     			node<T>* newb;
                 newb = new node<T>();
@@ -317,10 +330,11 @@ class lfcatree {
     // Find base nodes in a depth first traversal through route nodes. Uses a
     // stack s to store the search path to the current base node.
     node<T>* find_base_stack(node<T>* n, int i, stack<T>* s) {
-        s->stack_lib = new std::stack<node<T>*>(); // stack_reset
-        s->stack_array = new std::vector<node<T>*>();
-        if(n == NULL || s == NULL) return NULL;
-
+        if(s == NULL || s->stack_lib == NULL || s->stack_array == NULL) {
+            s->stack_lib = new std::stack<node<T>*>(); // stack_reset
+            s->stack_array = new std::vector<node<T>*>();
+        }
+        if (n == NULL) return NULL;
         while(n->type == route) {
             push(s, n);
             if(i < n->key) {
@@ -340,7 +354,13 @@ class lfcatree {
     // search path to the current base node. Compared to the previous function,
     // the search begins from the current head of the stack
     node<T>* find_next_base_stack(stack<T>* s) {
+                lock.lock();
+                std::cout << "pease1" << "\n";
+                lock.unlock();
     	node<T>* base = pop(s);
+                lock.lock();
+                std::cout << "pease" << "\n";
+                lock.unlock();
     	node<T>* t = top(s);
     	if(t == NULL) return NULL;
 
@@ -384,11 +404,6 @@ class lfcatree {
         return newrb;
 	 }
 
-    void my_test(stack<T>* s) {
-        s->stack_lib = new std::stack<node<T>*>();
-        s->stack_array = new std::vector<node<T>*>();
-    }
-
     // Range Query
     // Goes through all base nodes that may contain items in range in ascending
     // key order. Replaces each base node by type `range_base` to indicate that it
@@ -400,23 +415,17 @@ class lfcatree {
     	node<T>* b;
     	rs<T>* my_s;
 
-        stack<T> yo;
-        my_test(&yo);
-
-
         find_first:b = find_base_stack((&t->root)->load(),lo,&s); // Find base nodes
 
     	if(help_s != NULL) { // result storage
-            lock.lock();
-            std::cout << "checkpoint5" << "\n";
-            lock.unlock();
     		if(b->type != range || help_s != b->storage) { // update result query
     			return (&help_s->result)->load();
     		} else { // is a range base and storage has been set by another thread
-				 my_s = help_s;
+			    my_s = help_s;
 			}
     	} else if(is_replaceable(b)) { // result field != not_set_status
     		my_s = new rs<T>;
+            my_s->result = new std::vector<T>();
             my_s->result = not_set_status;
             my_s->more_than_one_base = false;
     		node<T>* n = new_range_base(b, lo, hi, my_s); // new range base with updated result storage
@@ -424,12 +433,12 @@ class lfcatree {
     		if(!try_replace(t, b, n)) {
                 goto find_first; // reset range query
             }
-                lock.lock();
-                std::cout << "checkpoint6" << "\n";
-                lock.unlock();
 
+                lock.lock();
+                std::cout << "checkpoint6" <<  "\n";
+                lock.unlock();
     		replace_top(&s, n);
-    	} else if( b->type == range && b->hi >= hi) { // expand range query
+    	} else if(b->type == range && b->hi >= hi) { // expand range query
             lock.lock();
             std::cout << "checkpoint7" << "\n";
             lock.unlock();
@@ -449,6 +458,7 @@ class lfcatree {
             std::vector<int>::iterator it; // get maximum value
             it = max_element(b->data->begin(), b->data->end());
 	    	if (!b->data->empty() && *it >= hi) {
+                /*
                 lock.lock();
                 std::cout << "\n";
                 for(it = b->data->begin(); it != b->data->end(); ++it) {
@@ -456,9 +466,9 @@ class lfcatree {
                 }
                 std::cout << "\n";
                 lock.unlock();
+                */
 				break;
             }
-
 	    	find_next_base_node: b = find_next_base_stack(&s);
 	    	if(b == NULL) {
                 lock.lock();
@@ -503,12 +513,16 @@ class lfcatree {
 	    	}
     	}
 
+
     	std::vector<T>* res = done.stack_array->at(0)->data; // stack array is just an array of nodes
     	for(int i = 1; i < done.stack_array->size(); i++)
     		res = vector_join(res, done.stack_array->at(i)->data); // join all the data in the base nodes together
 
         if((&my_s->result)->compare_exchange_weak(not_set_status, res, // if still not set by another thread, replace
         std::memory_order_release, std::memory_order_relaxed)) { // && done.stack_lib->size() > 1) {
+                lock.lock();
+                std::cout << "asdf" << my_s->result << "\n";
+                lock.unlock();
     	    (&my_s->more_than_one_base)->store(true);
         }
 
