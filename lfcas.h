@@ -80,38 +80,3 @@ struct arg_struct {
     int tid;
     void* self;
 };
-/* Node Types
-template <class T>
-struct route_node {
-    int key; // Split key
-    std::atomic<node<T>*> left; // < key
-    std::atomic<node<T>*> right; // >= key
-    std::atomic<T> valid = true; // Used for join
-    std::atomic<node<T>*> join_id = NULL; // ...
-};
-template <class T>
-struct normal_base {
-    std::vector<T>* data = NULL; // Items in the set
-    int stat = 0; // Statistics variable
-    node<T>* parent = NULL; // Parent node or NULL (root)
-};
-template <class T>
-struct range_base {
-    normal_base<T>* base;
-    int lo; int hi; // Low and high key
-    rs<T>* storage;
-};
-template <class T>
-struct join_main {
-    normal_base<T>* base;
-    node<T>* neigh1; // First (not joined) neighbor base
-    std::atomic<node<T>*> neigh2 = PREPARING; // Joined n...
-    node<T>* gparent; // Grand parent
-    node<T>* otherb; // Other branch
-};
-template <class T>
-struct join_neighbor {
-    normal_base<T>* base;
-    node<T>* main_node; // The main node for the join
-};
-*/
