@@ -122,13 +122,13 @@ class lfcatree {
 
 				newb->stat = new_stat(base, cont_info);
     			if(try_replace(m, base, newb)) {
-    				adapt_if_needed(m, newb);
+    				// adapt_if_needed(m, newb);
     				return res;
     			}
 			}
     	}
     	cont_info = contended;
-    	help_if_needed(m, base);
+    	// help_if_needed(m, base);
     }
 
     //=== Vector Functions ==========================
@@ -418,7 +418,7 @@ class lfcatree {
     	} else if(b->type == range && b->hi >= hi) { // expand range query
     		return all_in_range(t, b->lo, b->hi, b->storage);
     	} else {
-    		help_if_needed(t, b);
+    		// help_if_needed(t, b);
     		goto find_first;
     	}
 
@@ -454,7 +454,7 @@ class lfcatree {
 	    			goto find_next_base_node;
 	    		}
 	    	} else { // another thread has intercepted; help it out
-	    		help_if_needed(t, b);
+	    		// help_if_needed(t, b);
 	    		s = copy_state(&backup_s); // reset stack
 	    		goto find_next_base_node;
 	    	}
@@ -469,7 +469,7 @@ class lfcatree {
     	    (&my_s->more_than_one_base)->store(true);
         }
 
-    	adapt_if_needed(t, done.stack_array->at(rand() % done.stack_array->size()));
+    	// adapt_if_needed(t, done.stack_array->at(rand() % done.stack_array->size()));
     	return (&my_s->result)->load();
     }
 

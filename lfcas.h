@@ -20,9 +20,9 @@
 #define LOW_CONT -1000 // ...
 #define NOT_FOUND (node<T>*)1 // Special pointers
 #define NUM_THREADS 10
-#define NUM_UPDATE 10
-#define NUM_LOOKUP 10
-#define NUM_QUERY 1
+#define NUM_UPDATE 40
+#define NUM_LOOKUP 40
+#define NUM_QUERY 20
 enum contention_info { contended , uncontened , noinfo };
 enum node_type {
     route, normal, joinmain, joinneighbor, range
