@@ -26,13 +26,6 @@ class lfcatree {
 	        return m->root.compare_exchange_weak(b, new_b, // cas
                    std::memory_order_release, std::memory_order_relaxed);
         } else if((&b->parent->left)->load() == b) { // b is on left
-            /*
-            lock.lock();
-            std::cout << "checkpoint1" << "\n";
-            std::cout << b->parent->left.compare_exchange_weak(b, new_b, // cas
-                   std::memory_order_release, std::memory_order_relaxed) << "\n";
-            lock.unlock();
-            */
 	        return b->parent->left.compare_exchange_weak(b, new_b, // cas
                    std::memory_order_release, std::memory_order_relaxed);
         } else if((&b->parent->right)->load() == b) { // b is on right
@@ -129,13 +122,13 @@ class lfcatree {
 
 				newb->stat = new_stat(base, cont_info);
     			if(try_replace(m, base, newb)) {
-    				adapt_if_needed(m, newb);
+    				//adapt_if_needed(m, newb);
     				return res;
     			}
 			}
     	}
     	cont_info = contended;
-    	help_if_needed(m, base);
+    	//help_if_needed(m, base);
     }
 
     //=== Vector Functions ==========================
@@ -210,7 +203,6 @@ class lfcatree {
     }
 
     //=== Stack Functions ===========================
-
     // Range Query
     void push(stack<T>* s, node<T>* n) {
         if(s == NULL || s->stack_lib == NULL) {
@@ -382,7 +374,13 @@ class lfcatree {
 
 		newrb->lo = lo;
 		newrb->hi = hi;
+
+        newrb->storage = new rs<T>();
 		newrb->storage = s;
+
+        enum node_type type;
+        type = range;
+        newrb->type = node_type();
         newrb->type = range;
         return newrb;
 	 }
@@ -400,9 +398,6 @@ class lfcatree {
         find_first:b = find_base_stack((&t->root)->load(),lo,&s); // Find base nodes
 
     	if(help_s != NULL) { // result storage
-                lock.lock();
-                std::cout << "checkpoint2" <<  "\n";
-                lock.unlock();
     		if(b->type != range || help_s != b->storage) { // update result query
     			return (&help_s->result)->load();
     		} else { // is a range base and storage has been set by another thread
@@ -423,7 +418,7 @@ class lfcatree {
     	} else if(b->type == range && b->hi >= hi) { // expand range query
     		return all_in_range(t, b->lo, b->hi, b->storage);
     	} else {
-    		help_if_needed(t, b);
+    		//help_if_needed(t, b);
     		goto find_first;
     	}
 
@@ -433,22 +428,12 @@ class lfcatree {
         done.stack_array = new std::vector<node<T>*>();
     	while(true) { // Find remaining base nodes
 	    	push(&done, b); // ultimate final result stack (NOT the route nodes)
-            // NOTE: DONE IS NULL
 	    	backup_s = copy_state(&s);
 
             std::vector<int>::iterator it; // get maximum value
             it = max_element(b->data->begin(), b->data->end());
 
 	    	if (!b->data->empty() && *it >= hi) {
-                /*
-                lock.lock();
-                std::cout << "\n";
-                for(it = b->data->begin(); it != b->data->end(); ++it) {
-                    std::cout << *it << " ";
-                }
-                std::cout << "\n";
-                lock.unlock();
-                */
 				break;
             }
 	    	find_next_base_node: b = find_next_base_stack(&s);
@@ -469,7 +454,7 @@ class lfcatree {
 	    			goto find_next_base_node;
 	    		}
 	    	} else { // another thread has intercepted; help it out
-	    		help_if_needed(t, b);
+	    		//help_if_needed(t, b);
 	    		s = copy_state(&backup_s); // reset stack
 	    		goto find_next_base_node;
 	    	}
@@ -484,7 +469,7 @@ class lfcatree {
     	    (&my_s->more_than_one_base)->store(true);
         }
 
-    	adapt_if_needed(t, done.stack_array->at(rand() % done.stack_array->size()));
+    	//adapt_if_needed(t, done.stack_array->at(rand() % done.stack_array->size()));
     	return (&my_s->result)->load();
     }
 
@@ -830,6 +815,7 @@ class lfcatree {
         }
         for (int i = 0; i < NUM_THREADS; i++) {
             pthread_join(threads[i], NULL);
+            printf("finished thread %d\n", i);
         }
     }
 
